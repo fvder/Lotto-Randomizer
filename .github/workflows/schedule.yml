@@ -22,5 +22,6 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           RECIPIENT: ${{ secrets.RECIPIENT }}
+          RECIPIENT_2: ${{ secrets.RECIPIENT_2 }}
         run: |
           python lotto-randomizer.py
