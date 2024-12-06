@@ -16,13 +16,9 @@ jobs:
 
       - name: Determine draw type and target
         shell: bash
-        env:
-          pythonLocation: /opt/hostedtoolcache/Python/3.12.7/x64
-          LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.7/x64/lib
         run: |
           set -euo pipefail
           DAY_OF_WEEK=$(date -u +%u)
-          # Sunday=7, Monday=1, Wednesday=3, Thursday=4
           if [ "$DAY_OF_WEEK" = "7" ]; then
             echo "DRAW_TYPE=DAILY_GRAND" >> $GITHUB_ENV
             echo "TARGET_DRAW=MONDAY" >> $GITHUB_ENV
