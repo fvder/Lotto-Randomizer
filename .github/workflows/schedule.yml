@@ -2,10 +2,10 @@ name: schedule
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * 0"  # Sunday
-    - cron: "0 12 * * 1"  # Monday
-    - cron: "0 12 * * 3"  # Wednesday
-    - cron: "0 12 * * 4"  # Thursday
+    - cron: "0 12 * * 0"  # Sunday for Monday's Daily Grand
+    - cron: "0 12 * * 1"  # Monday for Tuesday's Lotto Max
+    - cron: "0 12 * * 3"  # Wednesday for Thursday's Daily Grand
+    - cron: "0 12 * * 4"  # Thursday for Friday's Lotto Max
 
 jobs:
   run-code:
@@ -13,15 +13,40 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.x'
-      - name: Run
+          python-version: "3.x"
+      
+      - name: Determine draw type and target
+        run: |
+          DAY_OF_WEEK=$(date -u +%u)
+          # Sunday=7, Monday=1, Wednesday=3, Thursday=4
+          if [ "$DAY_OF_WEEK" = "7" ]; then
+            echo "DRAW_TYPE=DAILY_GRAND" >> $GITHUB_ENV
+            echo "TARGET_DRAW=MONDAY" >> $GITHUB_ENV
+          elif [ "$DAY_OF_WEEK" = "1" ]; then
+            echo "DRAW_TYPE=LOTTO_MAX" >> $GITHUB_ENV
+            echo "TARGET_DRAW=TUESDAY" >> $GITHUB_ENV
+          elif [ "$DAY_OF_WEEK" = "3" ]; then
+            echo "DRAW_TYPE=DAILY_GRAND" >> $GITHUB_ENV
+            echo "TARGET_DRAW=THURSDAY" >> $GITHUB_ENV
+          elif [ "$DAY_OF_WEEK" = "4" ]; then
+            echo "DRAW_TYPE=LOTTO_MAX" >> $GITHUB_ENV
+            echo "TARGET_DRAW=FRIDAY" >> $GITHUB_ENV
+          else
+            echo "DRAW_TYPE=" >> $GITHUB_ENV
+            echo "TARGET_DRAW=" >> $GITHUB_ENV
+
+      - name: Run lottery code
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           RECIPIENT: ${{ secrets.RECIPIENT }}
           RECIPIENT_2: ${{ secrets.RECIPIENT_2 }}
+          DRAW_TYPE: ${{ env.DRAW_TYPE }}
+          TARGET_DRAW: ${{ env.TARGET_DRAW }}
         run: |
-          python lotto-randomizer.py
+          python code.py
+
