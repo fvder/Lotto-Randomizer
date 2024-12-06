@@ -34,6 +34,7 @@ jobs:
           else
             echo "DRAW_TYPE=" >> $GITHUB_ENV
             echo "TARGET_DRAW=" >> $GITHUB_ENV
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v2
