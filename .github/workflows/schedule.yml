@@ -20,6 +20,10 @@ jobs:
           python-version: "3.x"
       
       - name: Determine draw type and target
+        shell: bash
+        env:
+          pythonLocation: /opt/hostedtoolcache/Python/3.12.7/x64
+          LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.7/x64/lib
         run: |
           DAY_OF_WEEK=$(date -u +%u)
           # Sunday=7, Monday=1, Wednesday=3, Thursday=4
@@ -37,7 +41,7 @@ jobs:
             echo "TARGET_DRAW=FRIDAY" >> $GITHUB_ENV
           else
             echo "DRAW_TYPE=" >> $GITHUB_ENV
-            echo "TARGET_DRAW=" >> $GITHUB_ENV
+            echo "TARGET_DRAW=" >> $GITHUB_ENV   
 
       - name: Run lottery code
         env:
