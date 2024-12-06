@@ -2,25 +2,20 @@ name: schedule
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * 0"  # Sunday for Monday's Daily Grand
-    - cron: "0 12 * * 1"  # Monday for Tuesday's Lotto Max
-    - cron: "0 12 * * 3"  # Wednesday for Thursday's Daily Grand
-    - cron: "0 12 * * 4"  # Thursday for Friday's Lotto Max
+    - cron: "0 12 * * 0"  # Sunday (for Monday's Daily Grand)
+    - cron: "0 12 * * 1"  # Monday (for Tuesday's Lotto Max)
+    - cron: "0 12 * * 3"  # Wednesday (for Thursday's Daily Grand)
+    - cron: "0 12 * * 4"  # Thursday (for Friday's Lotto Max)
 
 jobs:
   run-code:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v3
+        uses: actions/checkout@v2
 
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: "3.x"
-      
       - name: Determine draw type and target
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail
         env:
           pythonLocation: /opt/hostedtoolcache/Python/3.12.7/x64
           LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.7/x64/lib
@@ -41,8 +36,13 @@ jobs:
             echo "TARGET_DRAW=FRIDAY" >> $GITHUB_ENV
           else
             echo "DRAW_TYPE=" >> $GITHUB_ENV
-            echo "TARGET_DRAW=" >> $GITHUB_ENV   
+            echo "TARGET_DRAW=" >> $GITHUB_ENV
 
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.x"
+      
       - name: Run lottery code
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
@@ -52,5 +52,6 @@ jobs:
           DRAW_TYPE: ${{ env.DRAW_TYPE }}
           TARGET_DRAW: ${{ env.TARGET_DRAW }}
         run: |
-          python code.py
+          python lotto-randomizer.py
+
 
