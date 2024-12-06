@@ -18,7 +18,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DAY_OF_WEEK=$(date -u +%u)
+          # Use Eastern Time (including Daylight Savings adjustment)
+          DAY_OF_WEEK=$(TZ=America/New_York date +%u)
           if [ "$DAY_OF_WEEK" = "7" ]; then
             echo "DRAW_TYPE=DAILY_GRAND" >> $GITHUB_ENV
             echo "TARGET_DRAW=MONDAY" >> $GITHUB_ENV
@@ -34,7 +35,7 @@ jobs:
           else
             echo "DRAW_TYPE=" >> $GITHUB_ENV
             echo "TARGET_DRAW=" >> $GITHUB_ENV
-          fi
+          fi   
 
       - name: Set up Python
         uses: actions/setup-python@v2
