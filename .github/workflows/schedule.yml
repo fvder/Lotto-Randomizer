@@ -57,9 +57,9 @@
 name: schedule
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 12 * * 0"  # Sunday at 12:00 UTC
-    - cron: "0 12 * * 3"  # Wednesday at 12:00 UTC
+ # schedule:
+ #   - cron: "0 12 * * 0"  # Sunday at 12:00 UTC
+ #   - cron: "0 12 * * 3"  # Wednesday at 12:00 UTC
 
 jobs:
   run-code:
