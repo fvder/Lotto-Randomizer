@@ -1,0 +1,17 @@
+Databricks (workspaces + objects, no MFA)
+
+This one’s easy to keep simple: use a PAT (or service principal with client secret) stored in Dynatrace Credentials Vault, then hit the workspace REST APIs with HTTP monitors.
+
+Suggested monitors (per workspace):
+	•	Workspace reachability: GET https://<workspace>/api/2.0/clusters/list → expect 200 and "clusters".
+	•	Cluster state: GET .../api/2.0/clusters/get?cluster_id=<id> → assert body contains "state":"RUNNING".
+	•	Jobs service: GET .../api/2.1/jobs/list?limit=1 → assert 200.
+	•	SQL Warehouses: GET .../api/2.0/sql/warehouses → assert "warehouses".
+	•	Model Serving (if used): GET .../api/2.0/serving-endpoints (or a specific endpoint’s detail) → assert "state":"READY".
+
+Headers: Authorization: Bearer {{vault:databricks_pat}}
+Tags: platform:databricks, workspace:<name>, plus object:cluster|job|sql-warehouse|serving.
+
+Create SLOs per object type (e.g., all object:cluster in a workspace) and a top-level workspace SLO that rolls up critical monitors.
+
+If you don’t want PATs in Dynatrace at all, put a tiny proxy health API in your VPC that calls those Databricks APIs and returns the same JSON tokens. Dynatrace then only calls your proxy.
