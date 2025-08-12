@@ -1,0 +1,246 @@
+Terraform Configurations for AWS Metric-based SLOs (ca-central-1)
+
+Below are Dynatrace SLO definitions (using the dynatrace_slo Terraform resource) for key AWS services in region ca-central-1. Each SLO uses AWS CloudWatch metrics (ingested via CloudWatch integration or Metric Streams) to define good vs. total events for a particular Service Level Indicator (SLI). We scope each SLO to ca-central-1 and filter by AWS account (using tags or entity selectors), so they can be grouped per account. The SLOs cover availability (e.g. success/error rates), performance (latency or resource utilization), throughput (capacity usage), and cost/usage visibility where applicable. All SLOs are expressed with a Dynatrace metric expression for the percentage of “good” events over “total” events (or an equivalent percentage metric).
+
+Note: In the Terraform snippets, replace placeholders (like <ACCOUNT_TAG> or <ACCOUNT_ID>) with your actual Dynatrace tagging scheme or AWS account ID/alias. The filter uses Dynatrace entity selector syntax to restrict the SLO to the specified AWS account and region ￼. Each SLO name is also labeled with the service and region for clarity.
+
+S3 – Availability SLO (Request Success Rate)
+
+For Amazon S3, we define an availability SLO measuring the request success ratio. “Good” requests are those not resulting in 5xx server errors, and “total” requests are all S3 requests. The SLI is derived from CloudWatch metrics AllRequests (total request count) and 5xxErrors (count of server error responses) ￼. The SLO thus represents the percentage of S3 requests that succeeded (including any 4xx client errors as successes from the service’s perspective). We scope it to ca-central-1 and a specific AWS account via tags.
+
+resource "dynatrace_slo" "s3_availability" {
+  name        = "S3 Request Success Rate (ca-central-1)"
+  description = "Percentage of S3 requests without 5xx errors in ca-central-1"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_S3_BUCKET\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"                             # SLO evaluated over last 7 days (rolling window)
+  target      = 99.9                              # Target success percentage (e.g., 99.9%)
+  warning     = 99.5                              # Warning threshold
+  metric_expression = <<EOT
+    100 * (
+      (builtin:cloud.aws.s3.allRequests:sum - builtin:cloud.aws.s3.5xxErrors:sum)
+      / builtin:cloud.aws.s3.allRequests:sum
+    )
+  EOT
+}
+
+Explanation: The metric expression takes the total request count minus the count of 5xx errors, divided by total requests, times 100. This yields the successful request percentage. We use the Dynatrace-built metrics for S3 (e.g. builtin:cloud.aws.s3.allRequests and builtin:cloud.aws.s3.5xxErrors) which are available when S3 request metrics are enabled ￼ ￼. The :sum aggregator ensures we sum counts over the evaluation window (all buckets in that account/region). This SLO would alert if the S3 5xx error rate exceeds 0.1% (target 99.9% success).
+
+Sources: S3 metrics (AllRequests, 5xxErrors) ￼.
+
+Lambda – Availability SLO (Function Error Rate)
+
+For AWS Lambda, we set an SLO on invocation success rate. “Good” is the number of successful invocations and “total” is total invocations. We use CloudWatch metrics Invocations and Errors (which counts function errors/exceptions) ￼ ￼. The SLO represents the percentage of Lambda invocations that do not result in an error. This is scoped to all Lambda functions in ca-central-1 for a given account.
+
+resource "dynatrace_slo" "lambda_success_rate" {
+  name        = "Lambda Invocation Success Rate (ca-central-1)"
+  description = "Percentage of Lambda function invocations without errors in ca-central-1"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_LAMBDA_FUNCTION\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 99.0      # e.g., 99% of invocations succeed
+  warning     = 95.0
+  metric_expression = <<EOT
+    100 * (
+      (builtin:cloud.aws.lambda.invocations:sum - builtin:cloud.aws.lambda.errors:sum)
+      / builtin:cloud.aws.lambda.invocations:sum
+    )
+  EOT
+}
+
+Here we subtract the total error count from total invocations, then divide by total invocations. The Lambda Errors metric in CloudWatch counts invocations that result in a function error (usually considered a 4xx-type error for Lambda) ￼. This effectively gives the success ratio (i.e., 1 – error rate). Dynatrace also provides a built-in errorsRate metric for Lambda (percentage of failed invocations) ￼, but we use the explicit ratio to illustrate good/total. A target of 99% means we tolerate up to 1% error rate. (You could adjust to stricter targets or include throttled invocations if needed; a similar approach could be used with the Throttles metric for a throttle rate SLO.)
+
+Sources: Lambda metrics (Invocations, Errors) ￼ ￼.
+
+EC2 – Performance SLO (CPU Utilization Headroom)
+
+For EC2, we demonstrate a performance SLO focusing on CPU utilization – ensuring instances have CPU headroom and are not constantly maxed out. The SLI is defined as the percentage of time that CPU usage remains under a given threshold (e.g. 80%). We use the CloudWatch metric CPUUtilization (ingested as builtin:cloud.aws.ec2.cpu.usage, a percentage) ￼. We partition the metric by a threshold and count the “good” time slices (where CPU < 80%) versus total time slices.
+
+resource "dynatrace_slo" "ec2_cpu_headroom" {
+  name        = "EC2 CPU Under 80% SLO (ca-central-1)"
+  description = "Percentage of time EC2 instances run below 80% CPU (performance headroom)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"EC2_INSTANCE\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 99.0      # e.g., 99% of the time CPU is below threshold
+  warning     = 95.0
+  metric_expression = <<EOT
+    100 * (
+      builtin:cloud.aws.ec2.cpu.usage:avg:partition("util", value("good", lt(80))):splitBy():count
+      /
+      builtin:cloud.aws.ec2.cpu.usage:avg:splitBy():count
+    )
+  EOT
+}
+
+Explanation: We use a Dynatrace metric expression with the partition transformation to classify each data point as “good” if CPU < 80% ￼ ￼. The expression counts the number of samples where CPU was under 80, divided by the total number of samples, and multiplies by 100. This yields the percentage of time across all instances (in the account & region filter) that CPU usage stayed below 80%. A high value (close to 100%) indicates that EC2 instances had adequate CPU headroom most of the time. This helps track performance – if the SLO drops, it means CPUs were frequently running hot (above 80%). You can adjust the threshold or target as needed (for example, a stricter performance SLO might target CPU < 70% 99% of the time).
+
+Sources: EC2 CPU usage metric ￼; example of using partition for “good” vs “total” time slices ￼ ￼.
+
+(For EC2 availability, one could also define an SLO using StatusCheck metrics. For example, using StatusCheckFailed (instance status checks) to ensure a high percentage of time with no failures. In practice, this would involve counting intervals with StatusCheckFailed=0 as “good” time. Here we focus on CPU performance, but a similar pattern with partition could measure instance uptime.)
+
+RDS – Performance SLO (DB Instance Latency)
+
+For Amazon RDS, we create a performance SLO around database latency. We use the CloudWatch ReadLatency metric (average time per disk read operation) as a proxy for query/storage performance. The SLO monitors the percentage of DB read operations that complete quickly (under a threshold). In this example, we set a threshold of 50 ms (0.05 seconds) for “fast” reads. The metrics are ingested as builtin:cloud.aws.rds.latency.read (unit: seconds) ￼.
+
+resource "dynatrace_slo" "rds_read_latency" {
+  name        = "RDS Read Latency SLO (<50ms) (ca-central-1)"
+  description = "Percentage of RDS read operations completing in under 50ms (ca-central-1)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"RDS_INSTANCE\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 95.0      # e.g., 95% of reads under threshold
+  warning     = 90.0
+  metric_expression = <<EOT
+    100 * (
+      builtin:cloud.aws.rds.latency.read:avg:partition("latency", value("fast", lt(0.05))):splitBy():count
+      /
+      builtin:cloud.aws.rds.latency.read:avg:splitBy():count
+    )
+  EOT
+}
+
+We partition the RDS read latency metric to count “fast” reads (< 0.05s) versus total reads. The expression yields the percentage of read operations that are “fast.” A target of 95% might be set if we expect most reads to be quick. If this SLO falls below target, it indicates performance degradation (higher disk or query latency). You could similarly create an SLO for write latency using builtin:cloud.aws.rds.latency.write, or an SLO for resource usage (e.g. ensuring FreeStorageSpace or FreeableMemory remains above a threshold). RDS’s CPUUtilization (builtin:cloud.aws.rds.cpu.usage) could also be used for a CPU headroom SLO analogous to EC2’s.
+
+Sources: RDS latency metrics ￼; partitioning method for performance SLO ￼.
+
+DynamoDB – Throughput SLO (Capacity Usage and Throttling)
+
+For Amazon DynamoDB, a crucial SLI is how often the database hits its provisioned throughput limits (causing throttling). We define an SLO to ensure DynamoDB has headroom in capacity and minimal throttled requests. One approach is to measure the fraction of time that DynamoDB consumed capacity stays below 100% of provisioned capacity. CloudWatch provides metrics for consumed vs. provisioned capacity; for example, ConsumedReadCapacityUnits and ProvisionedReadCapacityUnits, and Dynatrace offers a percent metric builtin:cloud.aws.dynamo.capacityUnits.read (% of provisioned read capacity consumed) ￼ (similarly for write). Here we ensure reads are not fully utilized (to avoid read throttling).
+
+resource "dynatrace_slo" "dynamo_capacity_headroom" {
+  name        = "DynamoDB Read Capacity Headroom SLO (ca-central-1)"
+  description = "Percentage of time DynamoDB read capacity usage stays below 100% (no throttling)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_DYNAMODB_TABLE\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 99.5     # e.g., 99.5% of the time capacity is under limit
+  warning     = 99.0
+  metric_expression = <<EOT
+    100 * (
+      builtin:cloud.aws.dynamo.capacityUnits.read:avg:partition("capacity", value("withinLimit", lt(100))):splitBy():count
+      /
+      builtin:cloud.aws.dynamo.capacityUnits.read:avg:splitBy():count
+    )
+  EOT
+}
+
+This SLO uses the Read capacity utilization percentage metric. It partitions the metric to count intervals where usage is below 100% of provisioned (i.e., not throttled) versus all intervals. A result of 100% would mean the table never fully utilized its read capacity during the period. We set a high target (e.g. 99.5%), aiming for almost no throttling. If the SLO drops, it indicates frequent throttling events (or sustained 100% utilization) on read capacity, meaning the application might be hitting its limits ￼. You could also create a similar SLO for write capacity (capacityUnits.write).
+
+Alternatively, one could directly measure the ThrottledRequests metric: Dynatrace provides builtin:cloud.aws.dynamo.requests.throttled (count of throttled requests) ￼ and builtin:cloud.aws.dynamo.errors.system (count of 5xx errors) ￼. An availability SLO could be defined as percentage of requests not throttled or erroring by combining those metrics with an estimate of total requests. For simplicity, the capacity headroom SLO above serves as a proxy – if capacity never hits 100%, throttled requests should be near zero.
+
+Sources: DynamoDB capacity and throttling metrics ￼ ￼.
+
+SQS – Performance SLO (Message Processing Delay)
+
+For Amazon SQS, a key indicator of performance is how quickly messages are processed. We use the metric ApproximateAgeOfOldestMessage (the age of the oldest pending message) ￼ to gauge delays/backlog. An SLO can be defined as the percentage of time the oldest message age stays below a certain threshold. For instance, we might require that 95% of the time, the oldest message is < 60 seconds old (meaning the queue is being drained promptly).
+
+resource "dynatrace_slo" "sqs_processing_delay" {
+  name        = "SQS Oldest Message Age <60s SLO (ca-central-1)"
+  description = "Percentage of time the oldest SQS message is under 60 seconds old (low queue delay)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_SQS_QUEUE\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 95.0      # e.g., 95% of the time, oldest message < 60s
+  warning     = 90.0
+  metric_expression = <<EOT
+    100 * (
+      builtin:cloud.aws.sqs.approximateAgeOfOldestMessage:avg:partition("delay", value("ok", lt(60))):splitBy():count
+      /
+      builtin:cloud.aws.sqs.approximateAgeOfOldestMessage:avg:splitBy():count
+    )
+  EOT
+}
+
+We leverage the SQS metric for oldest message age (in seconds) ￼ and partition it to identify “good” periods when the age is below 60. The SLO reflects how often the queue is kept shallow (no message waits more than 1 minute). If this SLO falls below the 95% target, it means that frequently the queue is backing up (messages are waiting too long, indicating consumers might be slow or underscaled). You can adjust the threshold based on acceptable delay (for some workloads, 5 or 10 seconds might be the target).
+
+For SQS availability, note that AWS SQS is a fully managed service and outright failures are rare; one could monitor AWS/SQS metrics like NumberOfMessagesSent vs. NumberOfMessagesDeleted to ensure messages are eventually processed (success throughput), but the processing delay (oldest message age) is usually more insightful for SQS performance.
+
+Sources: SQS metric (ApproximateAgeOfOldestMessage) ￼.
+
+API Gateway – Availability SLO (5xx Error Rate)
+
+For Amazon API Gateway, we define an SLO for API availability using the 5xx error ratio. CloudWatch provides metrics for total API requests and the count of 5xx responses (integration or gateway errors). The SLO is the percentage of API calls that succeed (i.e., do not result in a 5xx). We use Total request count and 5xxError metrics for API Gateway. In Dynatrace, these may be accessed as builtin:cloud.aws.apigw.requests and builtin:cloud.aws.apigw.errors.5xx (naming may vary; essentially the ratio of (Count – 5xx) to Count).
+
+resource "dynatrace_slo" "apigw_availability" {
+  name        = "API Gateway 5xx Success Rate (ca-central-1)"
+  description = "Percentage of API Gateway requests without 5xx errors (ca-central-1)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_APIGATEWAY_API\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 99.0      # e.g., 99% of requests succeed without 5xx
+  warning     = 97.0
+  metric_expression = <<EOT
+    100 * (
+      (builtin:cloud.aws.apigateway.requests:sum - builtin:cloud.aws.apigateway.errors.5xx:sum)
+      / builtin:cloud.aws.apigateway.requests:sum
+    )
+  EOT
+}
+
+This is analogous to the S3 availability SLO: we take total API requests minus 5xx failures, divided by total requests, to get the success percentage. A 5xx error in API Gateway indicates an issue (either in the gateway itself or the backend integration), so this SLO tracks the availability of the API service. We set a target (e.g. 99% or higher) depending on the reliability requirements. If needed, separate SLOs could be defined per stage or resource, but here we aggregate by service per account region. (You might also track 4xx rate for client errors for visibility, though those are not service availability issues.)
+
+Sources: API Gateway metrics (total requests and 5xx errors) – similar pattern to ALB metrics ￼.
+
+EBS – Performance/Throughput SLO (Volume Throughput Utilization)
+
+For Amazon EBS (Elastic Block Store), we create an SLO to ensure volume throughput is not continuously saturated. The CloudWatch metric VolumeThroughputPercentage measures the percentage of the throughput limit that the volume is using ￼. Using Dynatrace’s builtin:cloud.aws.ebs.throughput.percent metric, we define “good” as periods where throughput < 90% of the limit, indicating some headroom. The SLO is the percentage of time the volume(s) stay below 90% utilization.
+
+resource "dynatrace_slo" "ebs_throughput_headroom" {
+  name        = "EBS Throughput <90% SLO (ca-central-1)"
+  description = "Percentage of time EBS volumes operate below 90% of throughput capacity (avoiding saturation)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_EBS_VOLUME\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 99.0      # e.g., volumes under 90% throughput 99% of the time
+  warning     = 95.0
+  metric_expression = <<EOT
+    100 * (
+      builtin:cloud.aws.ebs.throughput.percent:avg:partition("util", value("good", lt(90))):splitBy():count
+      /
+      builtin:cloud.aws.ebs.throughput.percent:avg:splitBy():count
+    )
+  EOT
+}
+
+This SLO monitors storage performance. If it drops below target, it means volumes were frequently near their throughput cap (>=90% utilization), which could lead to increased latency or exhausted I/O credits. By maintaining, say, 99% of time under 90% utilization, we ensure spikes to full utilization are infrequent. You could similarly craft an SLO for VolumeQueueLength (to ensure queue length stays low) or VolumeLatency. For example, an SLO for latency could ensure read/write latency under a threshold similar to the RDS example. We chose throughput% to highlight cost/performance efficiency – it also gives cost visibility in that consistently high throughput usage might trigger scaling (to a larger volume or more IOPS) or incur additional I/O charges.
+
+Sources: EBS throughput % metric ￼.
+
+Auto Scaling – Availability SLO (Desired vs In-Service Instances)
+
+For EC2 Auto Scaling Groups, a key availability SLI is whether the group has all the instances it’s supposed to have running (in service). We define an SLO as the percentage of time the ASG maintains its desired capacity. We use CloudWatch metrics GroupInServiceInstances and GroupDesiredCapacity for the ASG. These metrics indicate how many instances are actually in service vs. how many are desired ￼ ￼. The SLO is essentially (InService / Desired) * 100 as a percentage.
+
+resource "dynatrace_slo" "asg_availability" {
+  name        = "Auto Scaling Capacity Fulfillment SLO (ca-central-1)"
+  description = "Percentage of time Auto Scaling Groups have all desired instances in service (ca-central-1)"
+  evaluation_type = "AGGREGATE"
+  filter      = "type(\"AWS_AUTOSCALING_GROUP\"),tag(\"aws:region:ca-central-1\"),tag(\"AWSAccount:<ACCOUNT_TAG>\")"
+  timeframe   = "-7d"
+  target      = 99.0      # e.g., ASGs at 100% of desired capacity 99% of the time
+  warning     = 95.0
+  metric_expression = <<EOT
+    100 * (
+      builtin:cloud.aws.autoscaling.groupInServiceInstances:avg 
+      / 
+      builtin:cloud.aws.autoscaling.groupDesiredCapacity:avg
+    )
+  EOT
+}
+
+Here we divide the number of in-service instances by the desired count for each ASG, yielding a percentage (when all instances are running, it’s 100%). Dynatrace will evaluate this expression across the ASGs in scope (split by group). Since we used an aggregate evaluation, the SLO will effectively represent a weighted average across groups, or we could filter to a single ASG by name if needed. A high value (close to 100%) means the Auto Scaling Groups are meeting their desired capacity almost all the time – no significant outages or instance shortages. If an ASG experiences an instance failure that isn’t immediately replaced, the metric drops below 100% until recovered ￼ ￼. This SLO provides a measure of service availability at the infrastructure level. (In a multi-ASG environment, you might define one SLO per ASG for clarity, each tagged by account and service tier.)
+
+Sources: Auto Scaling metrics (Desired vs InService instances) ￼ ￼.
+
+⸻
+
+Dynatrace Dashboard Aggregation
+
+To visualize these SLOs, we can create a Dynatrace dashboard that shows per-service and per-account health at a glance. Some recommendations:
+	•	Use SLO Tiles: Dynatrace allows adding SLO status tiles to dashboards. Each of the above SLOs, once created, can be added as a tile showing the current SLO percentage, status (green/yellow/red), and trend. Arrange the tiles grouped by service or by account. For example, you might have a section for each AWS service (S3, Lambda, EC2, etc.), and within each section, a tile per account showing that service’s SLO for that account. Alternatively, group by account: e.g., for Account A, show SLO tiles for all the above services.
+	•	Tag-based Filtering: Since we tagged/scoped SLOs by AWS account, you can leverage this in Dynatrace. For instance, you could create management zones for each AWS account or use the account tag to filter SLOs. In the Dynatrace SLO overview page, you can filter by tag or management zone to see all SLOs for a particular account ￼. On the dashboard, you might incorporate the account name in the SLO tile title or use separate dashboard pages per account.
+	•	Custom Charts: In addition to discrete SLO tiles, consider a custom chart showing multiple SLOs over time. For example, a line chart with SLO status for each service (or each account) can highlight trends and help identify if a particular service is breaching objectives regularly. Dynatrace SLOs create calculated metrics (e.g., func:slo.<name>) that represent the SLO percentage ￼, which can be charted. You could plot all SLO percentages for a given account as a multi-axis chart, or all accounts for a single service, to compare performance.
+	•	Overall Health Indicator: If desired, you can create a top-level “composite” indicator on the dashboard. This could be as simple as a markdown or traffic-light custom tile that summarizes how many SLOs are meeting targets vs. in warning/failure. While Dynatrace doesn’t automatically aggregate multiple SLOs into one, you can visually indicate overall health (e.g., all green if all SLOs met in the last week, etc.). The SLO overview page itself shows status and error budgets, which can be referenced.
+	•	Per-Service Sections: For clarity, your dashboard might have headings (text tiles) for each service. Under “S3”, place the S3 SLO tile (or one per account). Under “Lambda”, place the Lambda SLO tile(s), and so on. This way, you get a columnar view of each service’s reliability (availability, performance) in ca-central-1. Each tile is already scoped to the account from the SLO definition. You might also include key supporting metrics beside the SLO. For example, next to the S3 success rate SLO, show a chart of S3 request volume or 5xx count; next to the EC2 CPU SLO, show a chart of average CPU usage or number of high-CPU occurrences. This provides context and aids troubleshooting when an SLO is violated.
+
+By combining these SLO tiles and charts on a single dashboard, you achieve a holistic view: for each AWS service (S3, Lambda, EC2, RDS, DynamoDB, SQS, API Gateway, EBS, ASG), and for each account, you can quickly gauge if the service is healthy (meeting SLO) or if there are warnings/violations. This aligns operational visibility with SRE goals – focusing on service-level outcomes (availability, latency, etc.) rather than just raw metrics. It also helps in cost visibility: for instance, if the DynamoDB or EBS SLOs start trending down (indicating saturation), that might imply approaching capacity limits, which could incur extra costs or need scale-up. Those insights can be captured in the dashboard as well.
