@@ -1,0 +1,80 @@
+you can skip HTTP synthetics and use the Databricks extensions’ metrics to monitor workspace objects (jobs, clusters) and drive SLOs. The two official Hub extensions are:
+	•	Databricks (OneAgent) extension – collects Spark/cluster metrics (executor counts, failed tasks, cluster upsizing time, etc.) from Spark & Databricks APIs; metrics are attached to the driver host.  ￼
+	•	Databricks Workspace extension – polls the workspace REST API for job runs and cluster info, and exposes metrics like job success rate and durations (setup/execution/cleanup/queue). Great when you can’t install OneAgent (e.g., serverless).  ￼
+
+That means you can build metric-based SLOs (no MFA, no TLS headaches) for things like:
+	•	Jobs reliability: databricks.job.success_rate
+	•	Cluster health/capacity: executor alive count, failed tasks, cluster upsizing time (databricks.cluster.upsizing_time)
+	•	Job performance: run/setup/execution/cleanup/queue durations
+(All provided by those extensions—see metric keys on the Hub pages.)  ￼
+
+Why your HTTP synthetic is erroring (and easy outs)
+
+Databricks workspaces often sit behind IP allowlists or private networking. From public synthetic locations that aren’t allowlisted, you’ll commonly see SSL/connection failures. Quick fixes:
+	•	Run from a private synthetic location (ActiveGate) that has network access to the workspace (and trusts your corporate/forward-proxy certs).  ￼
+	•	If you must stay public, allowlist Dynatrace public IPs and make sure the monitor trusts the server chain (or add any enterprise MITM root CA to the ActiveGate truststore). Dynatrace’s error guides point straight at these root causes.  ￼
+	•	Or… avoid synthetics entirely for Databricks by using the Workspace extension, which only needs an ActiveGate that can reach your workspace URL plus a PAT.  ￼
+
+⸻
+
+Terraform: SLOs on Databricks extension metrics (examples)
+
+Using the Dynatrace provider’s dynatrace_slo_v2 (metric-expression based). These examples assume you tag the driver host (or use a host group like dbx-<workspace>) when you deploy OneAgent, and that the Workspace extension is also configured. 
+
+# 1) Job reliability SLO (Workspace extension)
+#    Target: 99% average job success rate over last 30d for one workspace
+resource "dynatrace_slo_v2" "dbx_job_success" {
+  name              = "DBX Job Success Rate – <workspace>"
+  metric_name       = "slo.dbx.job.success.<workspace>"
+  timeframe         = "-30d"
+  target_success    = 99.0
+  evaluation        = "AGGREGATE"
+  # Filter to the driver host(es) or management zone for this workspace
+  filter            = "type(\"HOST\"),tag(\"host_group:dbx-<workspace>\")"
+  # Metric already in percent; take the average
+  metric_expression = "avg(databricks.job.success_rate)"
+}
+
+# 2) Cluster capacity SLO (OneAgent extension)
+#    % of time there is at least 1 alive executor (alive_count > 0)
+resource "dynatrace_slo_v2" "dbx_cluster_alive" {
+  name              = "DBX Cluster Alive – <workspace>"
+  metric_name       = "slo.dbx.cluster.alive.<workspace>"
+  timeframe         = "-30d"
+  target_success    = 99.0
+  evaluation        = "AGGREGATE"
+  filter            = "type(\"HOST\"),tag(\"host_group:dbx-<workspace>\")"
+  metric_expression = <<EOT
+    100 * (
+      databricks.spark.executor.alive_count.gauge:avg:partition("p",value("good",gt(0))):count
+      /
+      databricks.spark.executor.alive_count.gauge:avg:count
+    )
+  EOT
+}
+
+# 3) Scale-up performance SLO (OneAgent extension)
+#    % of time cluster upsizing completes under 5 minutes
+resource "dynatrace_slo_v2" "dbx_upsizing_fast" {
+  name              = "DBX Upsizing under 5m – <workspace>"
+  metric_name       = "slo.dbx.upsizing.fast.<workspace>"
+  timeframe         = "-30d"
+  target_success    = 95.0
+  evaluation        = "AGGREGATE"
+  filter            = "type(\"HOST\"),tag(\"host_group:dbx-<workspace>\")"
+  metric_expression = <<EOT
+    100 * (
+      databricks.cluster.upsizing_time:avg:partition("p",value("fast",lt(300000))):count
+      /
+      databricks.cluster.upsizing_time:avg:count
+    )
+  EOT
+}
+
+Where these come from: the Workspace extension publishes databricks.job.success_rate and durations; the OneAgent extension publishes Spark/cluster metrics including executor counts and upsizing time—all documented on the Hub pages.  ￼
+
+⸻
+
+Coverage notes
+	•	Jobs & clusters: fully covered by the extensions (plus optional traces for jobs).  ￼
+	•	SQL Warehouses / Model Serving endpoints: not exposed by the current Hub extensions; for those, either (a) keep HTTP monitors (fix TLS/allowlist via private location) or (b) build a tiny Extension 2.0 polling those REST APIs via ActiveGate to emit custom metrics (still no MFA).  ￼
