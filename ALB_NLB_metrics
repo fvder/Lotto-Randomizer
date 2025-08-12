@@ -1,0 +1,107 @@
+Application Load Balancer (ALB) SLOs
+
+ALB Availability SLO: This SLO measures the percentage of successful requests served by the ALB in region ca-central-1, using CloudWatch metrics for request counts and 5xx errors. We define “good” events as total requests minus 5xx errors, and “total” events as total requests. The Dynatrace AWS integration provides built-in metrics for ALB request count and 5xx errors (both load balancer-originated and target-originated) ￼ ￼. The Terraform configuration uses a metric expression to compute the success rate = (RequestCount - (HTTPCode_ELB_5XX_Count + HTTPCode_Target_5XX_Count)) / RequestCount * 100. We scope the metric to ca-central-1 and filter by AWS account. We also tag the SLO with the AWS account ID to enable grouping by account ￼.
+
+resource "dynatrace_slo" "alb_availability" {
+  name            = "ALB Availability SLO (${var.aws_account_id})"
+  metric_name     = "aws.alb.availability.${var.aws_account_id}"
+  target          = 99.9                                    # Target availability percentage
+  timeframe       = "-30d"                                  # Evaluate over last 30 days
+  evaluation      = "AGGREGATE"                             # Aggregate evaluation over timeframe
+  tags            = { "aws_account" = var.aws_account_id }  # Tag SLO with AWS account ID
+  filter          = "eq(\"aws.region\", \"ca-central-1\") AND eq(\"aws.account.id\", \"${var.aws_account_id}\")"
+  metric_expression = <<EOT
+    100 * (
+      (builtin:cloud.aws.alb.requests:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+       - (
+           builtin:cloud.aws.alb.errors.alb.http5xx:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+           + 
+           builtin:cloud.aws.alb.errors.target.http5xx:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+         )
+      )
+      /
+      builtin:cloud.aws.alb.requests:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+    )
+  EOT
+}
+
+In the above, builtin:cloud.aws.alb.requests is the total request count metric, and builtin:cloud.aws.alb.errors.alb.http5xx / builtin:cloud.aws.alb.errors.target.http5xx represent ALB and target 5xx error counts ￼. The expression calculates the percentage of requests without 5xx errors. The filter ensures we only include ALB metrics from the ca-central-1 region and a specific AWS account. The SLO is tagged with the account ID for easy filtering per account.
+
+ALB Performance SLO: This SLO tracks ALB performance either by response time or by backend health. One approach is to use the TargetResponseTime metric, which measures how long targets take to respond ￼. However, CloudWatch doesn’t directly provide a count of “fast” vs “slow” requests. Instead, a simpler approach is to use HealthyHostCount as an indicator of performance capacity – ensuring the ALB has healthy targets available. We define the SLO as the percentage of time the ALB had at least one healthy target in ca-central-1 (or all targets healthy, depending on the desired strictness). We use the CloudWatch metric HealthyHostCount (or its complement UnHealthyHostCount) for the ALB’s target group ￼. In the metric expression below, we treat any moment with zero healthy hosts as a violation. The expression computes 100 * (duration_with_healthy_hosts / total_duration) over the timeframe.
+
+resource "dynatrace_slo" "alb_performance" {
+  name            = "ALB Performance SLO (${var.aws_account_id})"
+  metric_name     = "aws.alb.performance.${var.aws_account_id}"
+  target          = 99.0                                    # e.g., 99% of time with healthy hosts
+  timeframe       = "-30d"
+  evaluation      = "AGGREGATE"
+  tags            = { "aws_account" = var.aws_account_id }
+  filter          = "eq(\"aws.region\", \"ca-central-1\") AND eq(\"aws.account.id\", \"${var.aws_account_id}\")"
+  # Compute percentage of time with at least 1 healthy host
+  metric_expression = <<EOT
+    100 * (
+      (1 - avg(
+            builtin:cloud.aws.alb.hosts.unhealthy:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}")) 
+            > 0 ? 1 : 0
+          )
+      )
+    )
+  EOT
+}
+
+In this configuration, builtin:cloud.aws.alb.hosts.unhealthy represents the number of unhealthy targets for the ALB’s target group. We use a conditional expression (> 0 ? 1 : 0) to produce a value of 1 when there are unhealthy hosts (meaning performance degradation) and 0 when all hosts are healthy. By averaging this over time and subtracting from 1, we get the fraction of time with zero unhealthy hosts (i.e., all targets healthy). This yields the percentage of time the service had full healthy capacity. (Alternatively, if using response time, one could define a custom calculated metric counting requests below a threshold, but that requires additional setup beyond CloudWatch metrics.)
+
+Network Load Balancer (NLB) SLOs
+
+NLB Availability SLO: For Network Load Balancers, availability can be gauged by successful connection attempts vs. failed connections. AWS provides metrics such as ActiveFlowCount (active concurrent connections/flows) and various reset counts for connections ￼ ￼. Although CloudWatch doesn’t explicitly label a “FailedConnectionCount”, we can infer failures from reset metrics (for example, LoadBalancer Reset Count which indicates connections reset/dropped by the NLB) or other connection error indicators. In this SLO, we consider an attempted connection “good” if it did not result in a failure/reset. The metric expression calculates availability as (ActiveConnections - FailedConnections) / ActiveConnections * 100. In Dynatrace’s metrics, builtin:cloud.aws.nlb.flow.active tracks active connections ￼, and we can approximate FailedConnections using the sum of reset counts (client, load balancer, and target resets) ￼ ￼. The filter again scopes to ca-central-1 and the specific AWS account.
+
+resource "dynatrace_slo" "nlb_availability" {
+  name            = "NLB Availability SLO (${var.aws_account_id})"
+  metric_name     = "aws.nlb.availability.${var.aws_account_id}"
+  target          = 99.5                                    # Target availability (in %)
+  timeframe       = "-30d"
+  evaluation      = "AGGREGATE"
+  tags            = { "aws_account" = var.aws_account_id }
+  filter          = "eq(\"aws.region\", \"ca-central-1\") AND eq(\"aws.account.id\", \"${var.aws_account_id}\")"
+  metric_expression = <<EOT
+    100 * (
+      (
+        builtin:cloud.aws.nlb.flow.active:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+        - (
+            builtin:cloud.aws.nlb.tcp.reset.elb:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+            + builtin:cloud.aws.nlb.tcp.reset.client:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+            + builtin:cloud.aws.nlb.tcp.reset.target:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+          )
+      )
+      /
+      builtin:cloud.aws.nlb.flow.active:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+    )
+  EOT
+}
+
+Here, builtin:cloud.aws.nlb.flow.active is the number of active connections (flows) ￼. We subtract all types of TCP resets (client, ELB, target) as a proxy for failed or dropped connections ￼. The resulting ratio represents the percentage of connection attempts that remained established (i.e., not failed). This SLO reflects NLB availability from a connection perspective.
+
+NLB Performance SLO: Since NLB operates at Layer 4, it doesn’t have an HTTP response time metric. Performance can be interpreted in terms of infrastructure health (e.g., target availability). We use UnHealthyHostCount for the NLB’s target group ￼ as a proxy for performance capacity. Similar to the ALB performance SLO, we ensure that all NLB targets remain healthy. The SLO is defined as the percentage of time with zero unhealthy targets in ca-central-1. If any target becomes unhealthy, we consider that a performance degradation (as it could lead to increased load or connection issues on remaining targets). The Terraform snippet is analogous to the ALB healthy-host SLO, using NLB’s unhealthy host metric:
+
+resource "dynatrace_slo" "nlb_performance" {
+  name            = "NLB Performance SLO (${var.aws_account_id})"
+  metric_name     = "aws.nlb.performance.${var.aws_account_id}"
+  target          = 99.0                                    # e.g., 99% time all targets healthy
+  timeframe       = "-30d"
+  evaluation      = "AGGREGATE"
+  tags            = { "aws_account" = var.aws_account_id }
+  filter          = "eq(\"aws.region\", \"ca-central-1\") AND eq(\"aws.account.id\", \"${var.aws_account_id}\")"
+  metric_expression = <<EOT
+    100 * (
+      (1 - avg(
+            builtin:cloud.aws.nlb.hosts.unhealthy:filter(eq("aws.region","ca-central-1"),eq("aws.account.id","${var.aws_account_id}"))
+            > 0 ? 1 : 0
+          )
+      )
+    )
+  EOT
+}
+
+This is analogous to the ALB healthy hosts calculation. builtin:cloud.aws.nlb.hosts.unhealthy is the number of unhealthy targets in the NLB target group. The expression yields the percentage of time all NLB targets were healthy (UnHealthyHostCount = 0). In other words, it’s the fraction of the period during which the NLB had no detected target issues, which we use as a performance/reliability indicator.
+
+Note: In all the above SLOs, the filter ensures the SLO is scoped to the AWS region ca-central-1 and a specific account. In a multi-account setup, you can parameterize var.aws_account_id and even use Terraform’s for_each to create identical SLOs for each account in a list. The tags (SLO tags) include the account ID for easy grouping or API querying per account ￼.
